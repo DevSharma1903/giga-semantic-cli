@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Giga Console</title>
+  <link rel="stylesheet" href="style.css">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="glow-bg"></div>
+  <div class="container">
+    <header class="header">
+      <div class="mascot-container">
+        <pre class="mascot">
+   /\_/\   
+  ( o.o )  
+   > ^ <   GIGA CODES
+        </pre>
+      </div>
+      <h1 class="title">G I G A</h1>
+      <p class="subtitle">Git-Grounded AI Assistant</p>
+    </header>
+
+    <div class="stats-bar" id="statsBar">
+      <div class="stat-card">
+        <span class="stat-label">BRANCH</span>
+        <span class="stat-value" id="statBranch">loading...</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-label">CHANGES</span>
+        <span class="stat-value" id="statChanges">loading...</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-label">UPTIME</span>
+        <span class="stat-value" id="statUptime">00:00:00</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-label">COMMANDS</span>
+        <span class="stat-value" id="statCommands">0</span>
+      </div>
+    </div>
+
+    <main class="console-wrapper">
+      <div class="console-body" id="consoleBody">
+        <div class="console-welcome">
+          <p class="welcome-text">GIGA CLI active. Type <span class="highlight">/help</span> to view all commands, or type any local system command to run it.</p>
+        </div>
+      </div>
+      
+      <div class="input-container">
+        <div class="input-line">
+          <span class="prompt-symbol">giga &gt;</span>
+          <input type="text" id="cmdInput" placeholder="Enter command or type /help..." autofocus autocomplete="off" spellcheck="false">
+          <button id="sendBtn">Execute</button>
+        </div>
+      </div>
+    </main>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>
