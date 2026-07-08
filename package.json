@@ -1,6 +1,6 @@
 {
   "name": "giga-semantic-cli",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "Git-Grounded Autonomous AI Self-Healing Coding Agent",
   "type": "module",
   "main": "dist/cli.js",
@@ -21,7 +21,7 @@
   "scripts": {
     "test": "vitest run",
     "build": "tsc && node scripts/build-dist.js",
-    "build:binary": "bun build ./src/cli.ts --compile --minify --outfile dist/binaries/giga.exe",
+    "build:binary": "bun build ./src/cli.ts --target=node --outfile=./dist/binaries/cli.js && node -e \"const fs = require('fs'); const file = './dist/binaries/cli.js'; const data = fs.readFileSync(file); const shebang = Buffer.from('#!/usr/bin/env node\\n'); if (!data.toString().startsWith('#!')) { fs.writeFileSync(file, Buffer.concat([shebang, data])); }\"",
     "dashboard": "npx tsx src/server.ts"
   },
   "dependencies": {
