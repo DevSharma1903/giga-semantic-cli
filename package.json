@@ -1,6 +1,6 @@
 {
   "name": "giga-semantic-cli",
-  "version": "1.0.4",
+  "version": "1.0.6",
   "description": "Git-Grounded Autonomous AI Self-Healing Coding Agent",
   "type": "module",
   "main": "dist/cli.js",

@@ -13,4 +13,11 @@ const toolsDir = path.join(binariesDir, 'tools');
 fs.mkdirSync(toolsDir, { recursive: true });
 fs.copyFileSync(path.join(distDir, 'tools', 'index.js'), path.join(toolsDir, 'index.js'));
 
+const cliBinPath = path.join(binariesDir, 'cli.js');
+let cliData = fs.readFileSync(cliBinPath, 'utf8');
+const shebang = '#!/usr/bin/env node\n';
+if (!cliData.startsWith('#!')) {
+  fs.writeFileSync(cliBinPath, shebang + cliData, 'utf8');
+}
+
 console.log('✓ Successfully replicated build files into dist/binaries/ structure');
