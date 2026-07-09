@@ -28,7 +28,8 @@ import {
   createPullRequest,
   safeStageFiles,
   closeGithubIssue,
-  getRepoInfo
+  getRepoInfo,
+  safeguardGitignore
 } from './tools/index.js';
 
 dotenv.config();
@@ -117,7 +118,7 @@ const GigaApp = () => {
   const [agentState, setAgentState] = useState<GigaState>('TRIAGE');
   const [tokens, setTokens] = useState(0);
 
-  type WizardStep = 'none' | 'provider' | 'model' | 'api_key' | 'github_token';
+  type WizardStep = 'none' | 'provider' | 'model' | 'api_key' | 'github_token' | 'confirm_heal' | 'confirm_ship';
   const [wizardStep, setWizardStep] = useState<WizardStep>('none');
   const [configDraft, setConfigDraft] = useState<Record<string, string>>({});
   const [wizardInput, setWizardInput] = useState('');
@@ -174,7 +175,7 @@ const GigaApp = () => {
     };
   }, []);
 
-  const handleWizardInput = (value: string) => {
+  const handleWizardInput = async (value: string) => {
     const val = value.trim();
     if (!val) return;
     
@@ -190,10 +191,105 @@ const GigaApp = () => {
     } else if (wizardStep === 'github_token') {
       const finalConfig = { ...configDraft, GITHUB_TOKEN: val };
       saveEnv(finalConfig);
+      await safeguardGitignore(process.cwd());
       addLog({ text: chalk.green(`[giga] Configuration secured to .env file.`), status: 'success' });
       setWizardStep('none');
       setIsProcessing(false);
+    } else if (wizardStep === 'confirm_heal') {
+      if (val.toLowerCase() === 'y') {
+        setWizardStep('none');
+        await executeHeal();
+      } else {
+        addLog(chalk.yellow('[giga] Healing operation cancelled.'));
+        setWizardStep('none');
+        setIsProcessing(false);
+      }
+    } else if (wizardStep === 'confirm_ship') {
+      if (val.toLowerCase() === 'y') {
+        setWizardStep('none');
+        await executeShip();
+      } else {
+        addLog(chalk.yellow('[giga] Ship operation cancelled.'));
+        setWizardStep('none');
+        setIsProcessing(false);
+      }
     }
+  };
+
+  const executeHeal = async () => {
+    try {
+      addLog({ text: chalk.cyan(`[giga] Initiating Self-Healing...`), status: 'loading' });
+      const { owner, repo } = await getRepoInfo(process.cwd());
+      const git = getGitClient(process.cwd());
+      const status = await executeGitOperation(() => git.status(), 'Failed git status');
+      
+      if (!status.current || !status.current.startsWith('fix/issue-')) {
+        addLog(chalk.red(`[giga] Not on an active issue branch.`));
+        setIsProcessing(false);
+        return;
+      }
+      const issueNum = parseInt(status.current.replace('fix/issue-', ''), 10);
+      const issue = await fetchGithubIssue(issueNum, owner, repo);
+      const issueText = issue.title + '\n' + issue.body;
+      const allFiles = listCodeFiles(process.cwd());
+      
+      const res = await runSelfHealingIteration(issueText, allFiles.slice(0, 5), process.cwd());
+      completeActiveLogs();
+      
+      if (res.applied) {
+        addLog({ text: chalk.green(`[giga] Healing complete. Ready for /ship.`), status: 'success' });
+      } else if (res.diffText === 'NO_ISSUE') {
+        addLog({ text: chalk.green(`✨ Codebase matches target state. No engineering actions required.`), status: 'success' });
+        setAgentState('COMPLETED');
+      } else {
+        addLog(chalk.yellow(`[giga] No patches applied.`));
+      }
+    } catch (e: any) {
+      errorActiveLogs();
+      addLog(chalk.red(`[Error] ${e.message}`));
+      setAgentState('FAILED');
+    }
+    setIsProcessing(false);
+  };
+
+  const executeShip = async () => {
+    try {
+      setAgentState('DISPATCH');
+      addLog({ text: `[giga] Staging local workspace files...`, status: 'loading' });
+      
+      const git = getGitClient(process.cwd());
+      const status = await executeGitOperation(() => git.status(), 'Failed git status');
+      if (!status.current || !status.current.startsWith('fix/issue-')) {
+          addLog(chalk.red(`[giga] Not on an active issue branch.`));
+          setIsProcessing(false);
+          return;
+      }
+      
+      const issueNum = parseInt(status.current.replace('fix/issue-', ''), 10);
+      const { owner, repo } = await getRepoInfo(process.cwd());
+      
+      await safeStageFiles(git, process.cwd());
+      const gitDiff = await executeGitOperation(() => git.diff(['--cached']), 'Failed git diff');
+      if (!gitDiff) {
+          completeActiveLogs();
+          addLog(chalk.yellow(`[giga] No changes to stage.`));
+      } else {
+          addLog({ text: `[giga] Running push protection scanning filters...`, status: 'loading' });
+          const prData = await generatePullRequestDescription(gitDiff);
+          await executeGitOperation(() => git.commit(prData.title), 'Failed to commit');
+          await executeGitOperation(() => git.push(['origin', status.current!, '--force']), 'Failed push');
+          const prUrl = await createPullRequest(prData.title, prData.body, status.current, 'main', owner, repo);
+          completeActiveLogs();
+          addLog({ text: chalk.green(`[success] PR successfully dispatched upstream to GitHub: ${prUrl}`), status: 'success' });
+          await closeGithubIssue(issueNum, owner, repo);
+      }
+      setAgentState('COMPLETED');
+    } catch (e: any) {
+      errorActiveLogs();
+      addLog(chalk.red(`[Error] ${e.message}`));
+      setAgentState('FAILED');
+    }
+    setIsProcessing(false);
   };
 
   const handleSubmit = async (value: string) => {
@@ -242,69 +338,18 @@ const GigaApp = () => {
         const relFiles = await identifyRelevantFiles(issue.title, issue.body, allFiles);
         addLog({ text: chalk.cyan(`[giga] Branching context for issue #${issueNum}`), status: 'loading' });
         await createAndSwitchBranch(`fix/issue-${issueNum}`);
+        await safeguardGitignore(process.cwd());
         completeActiveLogs();
         addLog({ text: chalk.green(`[giga] Fork complete. Ready for /heal.`), status: 'success' });
 
       } else if (cmd.startsWith('/heal')) {
-        addLog({ text: chalk.cyan(`[giga] Initiating Self-Healing...`), status: 'loading' });
-        const { owner, repo } = await getRepoInfo(process.cwd());
-        const git = getGitClient(process.cwd());
-        const status = await executeGitOperation(() => git.status(), 'Failed git status');
-        
-        if (!status.current || !status.current.startsWith('fix/issue-')) {
-          addLog(chalk.red(`[giga] Not on an active issue branch.`));
-          setIsProcessing(false);
-          return;
-        }
-        const issueNum = parseInt(status.current.replace('fix/issue-', ''), 10);
-        const issue = await fetchGithubIssue(issueNum, owner, repo);
-        const issueText = issue.title + '\n' + issue.body;
-        const allFiles = listCodeFiles(process.cwd());
-        
-        const res = await runSelfHealingIteration(issueText, allFiles.slice(0, 5), process.cwd());
-        completeActiveLogs();
-        
-        if (res.applied) {
-          addLog({ text: chalk.green(`[giga] Healing complete. Ready for /ship.`), status: 'success' });
-        } else if (res.diffText === 'NO_ISSUE') {
-          addLog({ text: chalk.green(`✨ Codebase matches target state. No engineering actions required.`), status: 'success' });
-          setAgentState('COMPLETED');
-        } else {
-          addLog(chalk.yellow(`[giga] No patches applied.`));
-        }
-
+        setWizardStep('confirm_heal');
+        setWizardInput('');
+        return;
       } else if (cmd.startsWith('/ship')) {
-        setAgentState('DISPATCH');
-        addLog({ text: `[giga] Staging local workspace files...`, status: 'loading' });
-        
-        const git = getGitClient(process.cwd());
-        const status = await executeGitOperation(() => git.status(), 'Failed git status');
-        if (!status.current || !status.current.startsWith('fix/issue-')) {
-            addLog(chalk.red(`[giga] Not on an active issue branch.`));
-            setIsProcessing(false);
-            return;
-        }
-        
-        const issueNum = parseInt(status.current.replace('fix/issue-', ''), 10);
-        const { owner, repo } = await getRepoInfo(process.cwd());
-        
-        await safeStageFiles(git, process.cwd());
-        const gitDiff = await executeGitOperation(() => git.diff(['--cached']), 'Failed git diff');
-        if (!gitDiff) {
-            completeActiveLogs();
-            addLog(chalk.yellow(`[giga] No changes to stage.`));
-        } else {
-            addLog({ text: `[giga] Running push protection scanning filters...`, status: 'loading' });
-            const prData = await generatePullRequestDescription(gitDiff);
-            await executeGitOperation(() => git.commit(prData.title), 'Failed to commit');
-            await executeGitOperation(() => git.push(['origin', status.current!, '--force']), 'Failed push');
-            const prUrl = await createPullRequest(prData.title, prData.body, status.current, 'main', owner, repo);
-            completeActiveLogs();
-            addLog({ text: chalk.green(`[success] PR successfully dispatched upstream to GitHub: ${prUrl}`), status: 'success' });
-            await closeGithubIssue(issueNum, owner, repo);
-        }
-        setAgentState('COMPLETED');
-
+        setWizardStep('confirm_ship');
+        setWizardInput('');
+        return;
       } else {
         addLog(chalk.yellow(`Unknown command. Check directory menu.`));
       }
@@ -423,6 +468,34 @@ const GigaApp = () => {
                 onChange={setWizardInput}
                 onSubmit={handleWizardInput}
                 mask="*"
+              />
+            </Box>
+          </Box>
+        )}
+
+        {wizardStep === 'confirm_heal' && (
+          <Box flexDirection="column" alignItems="center" marginTop={2}>
+            <Text bold color="#FF8700">Security Check: Giga will execute local compilation scripts to verify code health.</Text>
+            <Text color="gray">Do you want to proceed? (y/n)</Text>
+            <Box borderStyle="round" width={50} borderColor="#FF8700">
+              <TextInput
+                value={wizardInput}
+                onChange={setWizardInput}
+                onSubmit={handleWizardInput}
+              />
+            </Box>
+          </Box>
+        )}
+
+        {wizardStep === 'confirm_ship' && (
+          <Box flexDirection="column" alignItems="center" marginTop={2}>
+            <Text bold color="#FF8700">Security Check: Giga will stage, commit, and push modifications upstream.</Text>
+            <Text color="gray">Do you want to proceed? (y/n)</Text>
+            <Box borderStyle="round" width={50} borderColor="#FF8700">
+              <TextInput
+                value={wizardInput}
+                onChange={setWizardInput}
+                onSubmit={handleWizardInput}
               />
             </Box>
           </Box>
