@@ -64,7 +64,10 @@ export async function getRepoInfo(cwd: string = process.cwd()): Promise<{ owner:
 }
 
 export async function fetchGithubIssue(issueNumber: number, owner: string, repo: string, token?: string): Promise<{ title: string; body: string; state: string; state_reason?: string | null }> {
-  const octokit = new Octokit({ auth: token || process.env.GITHUB_TOKEN });
+  const octokit = new Octokit({
+    auth: token || process.env.GITHUB_TOKEN,
+    request: { headers: { 'X-GitHub-Api-Version': '2026-03-10' } }
+  });
   const response = await octokit.rest.issues.get({
     owner,
     repo,
@@ -273,12 +276,13 @@ export async function safeStageFiles(git: SimpleGit, cwd: string = process.cwd()
 
 export async function createAndSwitchBranch(branchName: string, cwd: string = process.cwd()): Promise<void> {
   const git = getGitClient(cwd);
-  const summary = await executeGitOperation(() => git.branchLocal(), 'Failed to list local branches');
-  if (summary.all.includes(branchName)) {
-    await executeGitOperation(() => git.checkout(branchName), `Failed to checkout branch '${branchName}'`);
-  } else {
-    await executeGitOperation(() => git.checkoutLocalBranch(branchName), `Failed to create/checkout branch '${branchName}'`);
-  }
+  
+  // Local Repository Tracking Resilience
+  await executeGitOperation(() => git.fetch('origin'), 'Failed to fetch origin').catch(() => {});
+  await executeGitOperation(() => git.checkout('main'), 'Failed to checkout main').catch(() => {});
+  await executeGitOperation(() => git.branch(['-D', branchName]), 'Failed to delete old branch').catch(() => {});
+  
+  await executeGitOperation(() => git.checkoutLocalBranch(branchName), `Failed to create/checkout branch '${branchName}'`);
 }
 
 export async function getGitDiffSummary(cwd: string = process.cwd()): Promise<string> {
@@ -314,7 +318,10 @@ export async function createPullRequest(
   repo: string,
   token?: string
 ): Promise<string> {
-  const octokit = new Octokit({ auth: token || process.env.GITHUB_TOKEN });
+  const octokit = new Octokit({
+    auth: token || process.env.GITHUB_TOKEN,
+    request: { headers: { 'X-GitHub-Api-Version': '2026-03-10' } }
+  });
   const response = await octokit.rest.pulls.create({
     owner,
     repo,
@@ -358,6 +365,192 @@ export async function runTests(cwd: string): Promise<{ success: boolean; stdout:
     });
   });
 }
+
+export interface CompilerFailure {
+  filePath: string;
+  line: number;
+  column?: number;
+  message: string;
+}
+
+export async function runCompilation(cwd: string): Promise<{ success: boolean; stdout: string; stderr: string }> {
+  let command = 'npm run build';
+  const packageJsonPath = path.join(cwd, 'package.json');
+  if (fs.existsSync(packageJsonPath)) {
+    try {
+      const pkg = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+      if (pkg.scripts && pkg.scripts.build) {
+        command = 'npm run build';
+      } else if (fs.existsSync(path.join(cwd, 'tsconfig.json'))) {
+        command = 'npx tsc --noEmit';
+      }
+    } catch (_) {}
+  } else if (fs.existsSync(path.join(cwd, 'tsconfig.json'))) {
+    command = 'npx tsc --noEmit';
+  }
+
+  return new Promise((resolve) => {
+    exec(command, { cwd }, (error, stdout, stderr) => {
+      resolve({
+        success: !error,
+        stdout,
+        stderr
+      });
+    });
+  });
+}
+
+export function parseCompilerErrors(stdout: string, stderr: string, cwd: string): CompilerFailure[] {
+  const failures: CompilerFailure[] = [];
+  const combined = stdout + '\n' + stderr;
+  const lines = combined.split(/\r?\n/);
+
+  const pattern1 = /([a-zA-Z0-9_\-\.\/\\:]+\.[a-zA-Z0-9]+)\((\d+),(\d+)\):\s*(.*)/;
+  const pattern2 = /([a-zA-Z0-9_\-\.\/\\:]+\.[a-zA-Z0-9]+):(\d+):(\d+)\s*-\s*(.*)/;
+  const pattern3 = /([a-zA-Z0-9_\-\.\/\\:]+\.[a-zA-Z0-9]+):(\d+):(\d+):\s*(.*)/;
+  const pattern4 = /([a-zA-Z0-9_\-\.\/\\:]+\.[a-zA-Z0-9]+):(\d+)\s*-\s*(error.*)/;
+
+  for (const lineText of lines) {
+    let match = lineText.match(pattern1);
+    if (match) {
+      const file = match[1].trim();
+      if (!isIgnoredOrLockfile(file) && fs.existsSync(path.resolve(cwd, file))) {
+        failures.push({
+          filePath: file,
+          line: parseInt(match[2], 10),
+          column: parseInt(match[3], 10),
+          message: match[4].trim()
+        });
+        continue;
+      }
+    }
+
+    match = lineText.match(pattern2);
+    if (match) {
+      const file = match[1].trim();
+      if (!isIgnoredOrLockfile(file) && fs.existsSync(path.resolve(cwd, file))) {
+        failures.push({
+          filePath: file,
+          line: parseInt(match[2], 10),
+          column: parseInt(match[3], 10),
+          message: match[4].trim()
+        });
+        continue;
+      }
+    }
+
+    match = lineText.match(pattern3);
+    if (match) {
+      const file = match[1].trim();
+      if (!isIgnoredOrLockfile(file) && fs.existsSync(path.resolve(cwd, file))) {
+        failures.push({
+          filePath: file,
+          line: parseInt(match[2], 10),
+          column: parseInt(match[3], 10),
+          message: match[4].trim()
+        });
+        continue;
+      }
+    }
+
+    match = lineText.match(pattern4);
+    if (match) {
+      const file = match[1].trim();
+      if (!isIgnoredOrLockfile(file) && fs.existsSync(path.resolve(cwd, file))) {
+        failures.push({
+          filePath: file,
+          line: parseInt(match[2], 10),
+          message: match[3].trim()
+        });
+        continue;
+      }
+    }
+  }
+
+  const seen = new Set<string>();
+  return failures.filter(f => {
+    const key = `${f.filePath}:${f.line}:${f.message}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+export function applyUnifiedDiff(diffText: string, cwd: string = process.cwd()): void {
+  const lines = diffText.split(/\r?\n/);
+  let currentFile: string | null = null;
+  let fileLines: string[] = [];
+  let fileChanged = false;
+  let offset = 0;
+
+  const saveCurrentFile = () => {
+    if (currentFile && fileChanged) {
+      const absolutePath = path.isAbsolute(currentFile) ? currentFile : path.join(cwd, currentFile);
+      fs.writeFileSync(absolutePath, fileLines.join('\n'), 'utf8');
+    }
+  };
+
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+
+    if (line.startsWith('--- ')) {
+      const nextLine = lines[i + 1];
+      if (nextLine && nextLine.startsWith('+++ ')) {
+        saveCurrentFile();
+
+        let filePath = nextLine.substring(4).trim();
+        if (filePath.startsWith('b/')) {
+          filePath = filePath.substring(2);
+        }
+        currentFile = filePath;
+
+        const absolutePath = path.isAbsolute(filePath) ? filePath : path.join(cwd, filePath);
+        if (fs.existsSync(absolutePath)) {
+          fileLines = fs.readFileSync(absolutePath, 'utf8').split(/\r?\n/);
+        } else {
+          fileLines = [];
+        }
+        fileChanged = true;
+        offset = 0;
+        i += 2;
+        continue;
+      }
+    }
+
+    if (line.startsWith('@@ ')) {
+      const match = line.match(/^@@ -(\d+),?(\d+)? \+(\d+),?(\d+)? @@/);
+      if (match && currentFile) {
+        const oldStart = parseInt(match[1], 10);
+        let oldIdx = Math.max(0, oldStart - 1) + offset;
+        i++;
+
+        while (i < lines.length) {
+          const chunkLine = lines[i];
+          if (chunkLine.startsWith('@@ ') || chunkLine.startsWith('--- ')) {
+            i--;
+            break;
+          }
+
+          if (chunkLine.startsWith('-')) {
+            fileLines.splice(oldIdx, 1);
+            offset--;
+          } else if (chunkLine.startsWith('+')) {
+            fileLines.splice(oldIdx, 0, chunkLine.substring(1));
+            oldIdx++;
+            offset++;
+          } else {
+            oldIdx++;
+          }
+          i++;
+        }
+      }
+    }
+    i++;
+  }
+  saveCurrentFile();
+}
+
 
 /**
  * Resolves a path relative to the execution root or binary location.
@@ -718,7 +911,10 @@ export async function closeGithubIssue(
   repo: string,
   token?: string
 ): Promise<void> {
-  const octokit = new Octokit({ auth: token || process.env.GITHUB_TOKEN });
+  const octokit = new Octokit({
+    auth: token || process.env.GITHUB_TOKEN,
+    request: { headers: { 'X-GitHub-Api-Version': '2026-03-10' } }
+  });
   await octokit.rest.issues.update({
     owner,
     repo,
@@ -735,7 +931,10 @@ export async function closeIssueAsNotPlanned(
   reason: string,
   token?: string
 ): Promise<void> {
-  const octokit = new Octokit({ auth: token || process.env.GITHUB_TOKEN });
+  const octokit = new Octokit({
+    auth: token || process.env.GITHUB_TOKEN,
+    request: { headers: { 'X-GitHub-Api-Version': '2026-03-10' } }
+  });
   await octokit.rest.issues.createComment({
     owner,
     repo,
@@ -752,24 +951,23 @@ export async function closeIssueAsNotPlanned(
 }
 
 export function loadRCConfig(cwd: string = process.cwd()): void {
-  // 1. Check local .env.local in workspace
   const localRC = path.join(cwd, '.env.local');
   if (fs.existsSync(localRC)) {
     const content = fs.readFileSync(localRC, 'utf8');
     parseEnvContent(content);
   }
-  // 2. Check global ~/.gigarc
   const globalRC = path.join(os.homedir(), '.gigarc');
   if (fs.existsSync(globalRC)) {
     try {
       const config = JSON.parse(fs.readFileSync(globalRC, 'utf8'));
       if (config.LLM_PROVIDER) process.env.LLM_PROVIDER = config.LLM_PROVIDER;
+      if (config.LLM_MODEL) process.env.LLM_MODEL = config.LLM_MODEL;
       if (config.API_KEY) {
         process.env.API_KEY = config.API_KEY;
-        if (config.LLM_PROVIDER === 'Gemini (Google)') process.env.GEMINI_API_KEY = config.API_KEY;
-        if (config.LLM_PROVIDER === 'Claude (Anthropic)') process.env.ANTHROPIC_API_KEY = config.API_KEY;
+        if (config.LLM_PROVIDER === 'Google Gemini') process.env.GEMINI_API_KEY = config.API_KEY;
+        if (config.LLM_PROVIDER === 'Anthropic Claude') process.env.ANTHROPIC_API_KEY = config.API_KEY;
         if (config.LLM_PROVIDER === 'OpenAI') process.env.OPENAI_API_KEY = config.API_KEY;
-        if (config.LLM_PROVIDER === 'Groq') process.env.GROQ_API_KEY = config.API_KEY;
+        if (config.LLM_PROVIDER === 'DeepSeek') process.env.DEEPSEEK_API_KEY = config.API_KEY;
       }
       if (config.GITHUB_TOKEN) process.env.GITHUB_TOKEN = config.GITHUB_TOKEN;
     } catch (_) {}
@@ -787,43 +985,46 @@ function parseEnvContent(content: string): void {
       if (val.startsWith("'") && val.endsWith("'")) val = val.slice(1, -1);
       process.env[key] = val;
       if (key === 'API_KEY') {
-        if (process.env.LLM_PROVIDER === 'Gemini (Google)') process.env.GEMINI_API_KEY = val;
-        if (process.env.LLM_PROVIDER === 'Claude (Anthropic)') process.env.ANTHROPIC_API_KEY = val;
+        if (process.env.LLM_PROVIDER === 'Google Gemini') process.env.GEMINI_API_KEY = val;
+        if (process.env.LLM_PROVIDER === 'Anthropic Claude') process.env.ANTHROPIC_API_KEY = val;
         if (process.env.LLM_PROVIDER === 'OpenAI') process.env.OPENAI_API_KEY = val;
-        if (process.env.LLM_PROVIDER === 'Groq') process.env.GROQ_API_KEY = val;
+        if (process.env.LLM_PROVIDER === 'DeepSeek') process.env.DEEPSEEK_API_KEY = val;
       }
     }
   }
 }
 
 export function saveRCConfig(
-  config: { provider: string; apiKey: string; githubToken: string },
+  config: { provider: string; model: string; apiKey: string; githubToken: string },
   cwd: string = process.cwd()
 ): void {
   const rcData = {
     LLM_PROVIDER: config.provider,
+    LLM_MODEL: config.model,
     API_KEY: config.apiKey,
     GITHUB_TOKEN: config.githubToken
   };
-  
+
   const globalRC = path.join(os.homedir(), '.gigarc');
   fs.writeFileSync(globalRC, JSON.stringify(rcData, null, 2), 'utf8');
 
   const localRC = path.join(cwd, '.env.local');
   const envLines = [
     `LLM_PROVIDER="${config.provider}"`,
+    `LLM_MODEL="${config.model}"`,
     `API_KEY="${config.apiKey}"`,
     `GITHUB_TOKEN="${config.githubToken}"`
   ];
   fs.writeFileSync(localRC, envLines.join('\n'), 'utf8');
 
   process.env.LLM_PROVIDER = config.provider;
+  process.env.LLM_MODEL = config.model;
   process.env.API_KEY = config.apiKey;
   process.env.GITHUB_TOKEN = config.githubToken;
-  if (config.provider === 'Gemini (Google)') process.env.GEMINI_API_KEY = config.apiKey;
-  if (config.provider === 'Claude (Anthropic)') process.env.ANTHROPIC_API_KEY = config.apiKey;
+  if (config.provider === 'Google Gemini') process.env.GEMINI_API_KEY = config.apiKey;
+  if (config.provider === 'Anthropic Claude') process.env.ANTHROPIC_API_KEY = config.apiKey;
   if (config.provider === 'OpenAI') process.env.OPENAI_API_KEY = config.apiKey;
-  if (config.provider === 'Groq') process.env.GROQ_API_KEY = config.apiKey;
+  if (config.provider === 'DeepSeek') process.env.DEEPSEEK_API_KEY = config.apiKey;
 }
 
 export async function connectProvider(cwd: string = process.cwd()): Promise<void> {
@@ -832,10 +1033,11 @@ export async function connectProvider(cwd: string = process.cwd()): Promise<void
   const provider = await select({
     message: 'Select your preferred LLM provider:',
     options: [
-      { value: 'Gemini (Google)', label: 'Gemini (Google)' },
-      { value: 'Claude (Anthropic)', label: 'Claude (Anthropic)' },
+      { value: 'Google Gemini', label: 'Google Gemini' },
+      { value: 'Anthropic Claude', label: 'Anthropic Claude' },
       { value: 'OpenAI', label: 'OpenAI' },
-      { value: 'Groq', label: 'Groq' }
+      { value: 'DeepSeek', label: 'DeepSeek' },
+      { value: 'Local Ollama', label: 'Local Ollama (Offline)' }
     ]
   });
 
@@ -844,13 +1046,61 @@ export async function connectProvider(cwd: string = process.cwd()): Promise<void
     return;
   }
 
-  const apiKey = await password({
-    message: `Enter your API Key for ${provider}:`
+  let modelOptions: { value: string; label: string }[] = [];
+  if (provider === 'Google Gemini') {
+    modelOptions = [
+      { value: 'gemini-2.5-flash', label: 'gemini-2.5-flash' },
+      { value: 'gemini-2.5-pro', label: 'gemini-2.5-pro' },
+      { value: 'gemini-1.5-pro', label: 'gemini-1.5-pro' },
+      { value: 'gemini-ultra', label: 'gemini-ultra' }
+    ];
+  } else if (provider === 'Anthropic Claude') {
+    modelOptions = [
+      { value: 'claude-3-5-sonnet', label: 'claude-3-5-sonnet' },
+      { value: 'claude-3-5-haiku', label: 'claude-3-5-haiku' },
+      { value: 'claude-3-opus', label: 'claude-3-opus' }
+    ];
+  } else if (provider === 'OpenAI') {
+    modelOptions = [
+      { value: 'gpt-4o', label: 'gpt-4o' },
+      { value: 'gpt-4o-mini', label: 'gpt-4o-mini' },
+      { value: 'o1-preview', label: 'o1-preview' },
+      { value: 'o1-mini', label: 'o1-mini' }
+    ];
+  } else if (provider === 'DeepSeek') {
+    modelOptions = [
+      { value: 'deepseek-v3', label: 'deepseek-v3' },
+      { value: 'deepseek-r1', label: 'deepseek-r1' }
+    ];
+  } else if (provider === 'Local Ollama') {
+    modelOptions = [
+      { value: 'deepseek-coder:7b', label: 'deepseek-coder:7b' },
+      { value: 'llama3.1:8b', label: 'llama3.1:8b' },
+      { value: 'qwen2.5-coder:7b', label: 'qwen2.5-coder:7b' },
+      { value: 'mistral', label: 'mistral' }
+    ];
+  }
+
+  const model = await select({
+    message: 'Select the model engine:',
+    options: modelOptions
   });
 
-  if (isCancel(apiKey)) {
+  if (isCancel(model)) {
     console.log(chalk.yellow('Setup cancelled.'));
     return;
+  }
+
+  let apiKey = '';
+  if (provider !== 'Local Ollama') {
+    const keyInput = await password({
+      message: `Enter your API Key for ${provider}:`
+    });
+    if (isCancel(keyInput)) {
+      console.log(chalk.yellow('Setup cancelled.'));
+      return;
+    }
+    apiKey = String(keyInput);
   }
 
   const githubToken = await password({
@@ -864,7 +1114,8 @@ export async function connectProvider(cwd: string = process.cwd()): Promise<void
 
   saveRCConfig({
     provider: String(provider),
-    apiKey: String(apiKey),
+    model: String(model),
+    apiKey: apiKey,
     githubToken: String(githubToken)
   }, cwd);
 

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
-import { applyPatch, getTestCommand, findRelevantFiles, sanitizeErrorTrace, extractKeywordsAndPaths, checkSyntax, auditFileSystemAndImports, crawlWorkspace } from './index.js';
+import { applyPatch, getTestCommand, findRelevantFiles, sanitizeErrorTrace, extractKeywordsAndPaths, checkSyntax, auditFileSystemAndImports, crawlWorkspace, parseCompilerErrors, applyUnifiedDiff } from './index.js';
 
 const tempDir = path.resolve('temp_test_dir');
 
@@ -165,4 +165,55 @@ describe('Giga CLI Tools', () => {
       expect(matches).not.toContain('other.ts');
     });
   });
+
+  describe('parseCompilerErrors', () => {
+    it('should parse standard typescript compiler errors', () => {
+      const dummyFile = path.join(tempDir, 'broken.ts');
+      fs.writeFileSync(dummyFile, 'const x: number = "hello";', 'utf8');
+
+      // The log contains relative path from tempDir
+      const relativePath = 'broken.ts';
+      const logOutput = `${relativePath}(1,7): error TS2322: Type 'string' is not assignable to type 'number'.`;
+      
+      const failures = parseCompilerErrors(logOutput, '', tempDir);
+      expect(failures.length).toBe(1);
+      expect(failures[0].filePath).toBe(relativePath);
+      expect(failures[0].line).toBe(1);
+      expect(failures[0].column).toBe(7);
+      expect(failures[0].message).toBe("error TS2322: Type 'string' is not assignable to type 'number'.");
+    });
+  });
+
+  describe('applyUnifiedDiff', () => {
+    it('should apply a standard unified diff to multiple files', () => {
+      const file1 = path.join(tempDir, 'app.ts');
+      const file2 = path.join(tempDir, 'style.css');
+      
+      fs.writeFileSync(file1, 'console.log("hello");\nconsole.log("world");\n', 'utf8');
+      fs.writeFileSync(file2, 'body {\n  color: red;\n}\n', 'utf8');
+
+      const diffText = `
+--- a/app.ts
++++ b/app.ts
+@@ -1,2 +1,2 @@
+ console.log("hello");
+-console.log("world");
++console.log("giga");
+--- a/style.css
++++ b/style.css
+@@ -2,2 +2,2 @@
+-  color: red;
++  color: blue;
+ `;
+
+      applyUnifiedDiff(diffText, tempDir);
+
+      const content1 = fs.readFileSync(file1, 'utf8');
+      const content2 = fs.readFileSync(file2, 'utf8');
+
+      expect(content1).toBe('console.log("hello");\nconsole.log("giga");\n');
+      expect(content2).toBe('body {\n  color: blue;\n}\n');
+    });
+  });
 });
+

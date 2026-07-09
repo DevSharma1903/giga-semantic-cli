@@ -1,6 +1,4 @@
-node_modules/
-dist/
 .env
-*.log
-.gemini/
-*.bun-build
+.env.local
+node_modules
+dist
