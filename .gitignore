@@ -2,3 +2,7 @@
 .env.local
 node_modules
 dist
+
+*.bun-build
+.bun-build/
+
