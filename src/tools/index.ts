@@ -1,11 +1,11 @@
-import { simpleGit } from 'simple-git';
+import { simpleGit, SimpleGit } from 'simple-git';
 import { Octokit } from 'octokit';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { exec, execSync } from 'child_process';
 import chalk from 'chalk';
-import { confirm, isCancel, select, password, text } from '@clack/prompts';
+import { confirm, isCancel, select, password, text, log as clackLog } from '@clack/prompts';
 
 export async function askConfirmation(query: string): Promise<boolean> {
   const confirmed = await confirm({
@@ -41,8 +41,8 @@ export async function executeCommandSecurely(command: string, cwd: string = proc
 
 export async function getRepoInfo(cwd: string = process.cwd()): Promise<{ owner: string; repo: string }> {
   try {
-    const git = simpleGit(cwd);
-    const remotes = await git.getRemotes(true);
+    const git = getGitClient(cwd);
+    const remotes = await executeGitOperation(() => git.getRemotes(true), 'Failed to retrieve git remotes');
     const origin = remotes.find(r => r.name === 'origin') || remotes[0];
     if (!origin) {
       throw new Error("No remote found");
@@ -196,20 +196,96 @@ export function applyPatch(filePath: string, startLine: number, endLine: number,
   fs.writeFileSync(absolutePath, lines.join('\n'), 'utf8');
 }
 
+export function getGitClient(cwd: string = process.cwd()): SimpleGit {
+  return simpleGit({
+    baseDir: cwd,
+    timeout: {
+      block: 15000 // 15 seconds
+    }
+  });
+}
+
+export async function executeGitOperation<T>(
+  operation: () => Promise<T>,
+  errorMessage: string
+): Promise<T> {
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    setTimeout(() => {
+      reject(new Error("Timeout: Git operation took longer than 15 seconds."));
+    }, 15000);
+  });
+  
+  try {
+    return await Promise.race([operation(), timeoutPromise]);
+  } catch (error: any) {
+    const rawStderr = error.git?.stderr || error.stderr || error.message || String(error);
+    clackLog.error(`Git Error: ${errorMessage}`);
+    clackLog.error(`Details (stderr): ${rawStderr}`);
+    throw error;
+  }
+}
+
+export async function safeguardGitignore(cwd: string = process.cwd()): Promise<void> {
+  const gitignorePath = path.join(cwd, '.gitignore');
+  const envFilesToCheck = ['.env', '.env.local', '.env.production', '.gigarc'];
+  
+  for (const envFile of envFilesToCheck) {
+    const filePath = path.join(cwd, envFile);
+    if (fs.existsSync(filePath)) {
+      let isIgnored = false;
+      try {
+        const git = getGitClient(cwd);
+        await git.checkIgnore(envFile);
+        isIgnored = true;
+      } catch (e) {
+        isIgnored = false;
+      }
+      
+      if (!isIgnored) {
+        let gitignoreContent = '';
+        if (fs.existsSync(gitignorePath)) {
+          gitignoreContent = fs.readFileSync(gitignorePath, 'utf8');
+        }
+        const suffix = gitignoreContent.endsWith('\n') ? '' : '\n';
+        fs.writeFileSync(gitignorePath, `${gitignoreContent}${suffix}${envFile}\n`, 'utf8');
+        clackLog.warn(`Added ${envFile} to .gitignore for security.`);
+      }
+    }
+  }
+}
+
+export async function safeStageFiles(git: SimpleGit, cwd: string = process.cwd()): Promise<void> {
+  const status = await git.status();
+  const filesToStage = [
+    ...status.modified,
+    ...status.not_added,
+    ...status.deleted,
+    ...status.renamed.map(r => r.to)
+  ].filter(file => {
+    const basename = path.basename(file);
+    return !['.env', '.env.local', '.env.production', '.gigarc'].includes(basename);
+  });
+  
+  if (filesToStage.length > 0) {
+    await git.add(filesToStage);
+  }
+}
+
 export async function createAndSwitchBranch(branchName: string, cwd: string = process.cwd()): Promise<void> {
-  const git = simpleGit(cwd);
-  const summary = await git.branchLocal();
+  const git = getGitClient(cwd);
+  const summary = await executeGitOperation(() => git.branchLocal(), 'Failed to list local branches');
   if (summary.all.includes(branchName)) {
-    await git.checkout(branchName);
+    await executeGitOperation(() => git.checkout(branchName), `Failed to checkout branch '${branchName}'`);
   } else {
-    await git.checkoutLocalBranch(branchName);
+    await executeGitOperation(() => git.checkoutLocalBranch(branchName), `Failed to create/checkout branch '${branchName}'`);
   }
 }
 
 export async function getGitDiffSummary(cwd: string = process.cwd()): Promise<string> {
-  const git = simpleGit(cwd);
-  await git.add('.');
-  return await git.diff([
+  const git = getGitClient(cwd);
+  await safeguardGitignore(cwd);
+  await executeGitOperation(() => safeStageFiles(git, cwd), 'Failed to stage files for diff');
+  return await executeGitOperation(() => git.diff([
     'HEAD',
     '--',
     ':(exclude)package-lock.json',
@@ -218,14 +294,15 @@ export async function getGitDiffSummary(cwd: string = process.cwd()): Promise<st
     ':(exclude)bun.lockb',
     ':(exclude)node_modules',
     ':(exclude)dist'
-  ]);
+  ]), 'Failed to generate git diff');
 }
 
 export async function stageCommitPush(branchName: string, commitMessage: string, cwd: string = process.cwd()): Promise<void> {
-  const git = simpleGit(cwd);
-  await git.add('.');
-  await git.commit(commitMessage);
-  await git.push('origin', branchName, { '--set-upstream': null });
+  const git = getGitClient(cwd);
+  await safeguardGitignore(cwd);
+  await executeGitOperation(() => safeStageFiles(git, cwd), 'Failed to stage files');
+  await executeGitOperation(() => git.commit(commitMessage), `Failed to commit changes: "${commitMessage}"`);
+  await executeGitOperation(() => git.push('origin', branchName, { '--set-upstream': null }), `Failed to push branch '${branchName}'`);
 }
 
 export async function createPullRequest(

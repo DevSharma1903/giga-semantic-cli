@@ -3,8 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import chalk from 'chalk';
 import ora from 'ora';
-import { applyPatch, isIgnoredOrLockfile, checkSyntax, auditFileSystemAndImports, extractKeywordsAndPaths, getRepoInfo, fetchGithubIssue, listCodeFiles, crawlWorkspace, closeIssueAsNotPlanned } from './tools/index.js';
-import { simpleGit } from 'simple-git';
+import { applyPatch, isIgnoredOrLockfile, checkSyntax, auditFileSystemAndImports, extractKeywordsAndPaths, getRepoInfo, fetchGithubIssue, listCodeFiles, crawlWorkspace, closeIssueAsNotPlanned, getGitClient, executeGitOperation } from './tools/index.js';
 
 export let lastValidationState: 'healed' | 'stood_down' | 'untested' = 'untested';
 
@@ -504,8 +503,8 @@ export async function verifyIssueSanity(cwd: string = process.cwd()): Promise<bo
   let repoName = '';
 
   try {
-    const git = simpleGit(cwd);
-    const status = await git.status();
+    const git = getGitClient(cwd);
+    const status = await executeGitOperation(() => git.status(), 'Failed to get git status');
     const currentBranch = status.current;
     if (currentBranch && currentBranch.startsWith('fix/issue-')) {
       const issueNumberStr = currentBranch.replace('fix/issue-', '');

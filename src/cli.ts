@@ -31,9 +31,12 @@ import {
   checkSyntax,
   closeGithubIssue,
   loadRCConfig,
-  connectProvider
+  connectProvider,
+  getGitClient,
+  executeGitOperation,
+  safeguardGitignore,
+  safeStageFiles
 } from './tools/index.js';
-import { simpleGit } from 'simple-git';
 import {
   identifyRelevantFiles,
   runSelfHealingIteration,
@@ -140,23 +143,23 @@ async function runStartCommand(issueNumber: number) {
       await log.warn("Aborted: Issue #" + issueNumber + " is already CLOSED on GitHub.");
       await log.info("Reason: " + (issue.state_reason || "Completed"));
 
-      const git = simpleGit();
-      const status = await git.status();
+      const git = getGitClient();
+      const status = await executeGitOperation(() => git.status(), 'Failed to get status');
       const currentBranch = status.current;
       const targetBranch = `fix/issue-${issueNumber}`;
 
       if (currentBranch === targetBranch) {
         s.start('Switching to fallback branch');
-        const branches = await git.branchLocal();
+        const branches = await executeGitOperation(() => git.branchLocal(), 'Failed to get branch list');
         const fallbackBranch = branches.all.includes('main') ? 'main' : 'master';
-        await git.checkout(fallbackBranch);
+        await executeGitOperation(() => git.checkout(fallbackBranch), `Failed to checkout fallback branch '${fallbackBranch}'`);
         s.stop(chalk.bold.white(`Switched to fallback branch '${fallbackBranch}'`));
       }
 
-      const branches = await git.branchLocal();
+      const branches = await executeGitOperation(() => git.branchLocal(), 'Failed to get branch list');
       if (branches.all.includes(targetBranch)) {
         s.start(`Deleting local branch '${targetBranch}'`);
-        await git.deleteLocalBranch(targetBranch, true);
+        await executeGitOperation(() => git.deleteLocalBranch(targetBranch, true), `Failed to delete local branch '${targetBranch}'`);
         s.stop(chalk.bold.white(`Deleted local branch '${targetBranch}'`));
       }
 
@@ -208,8 +211,8 @@ async function runHealCommand() {
   try {
     let issueText = 'General healing request';
     try {
-      const git = simpleGit();
-      const status = await git.status();
+      const git = getGitClient();
+      const status = await executeGitOperation(() => git.status(), 'Failed to get status');
       const currentBranch = status.current;
       if (currentBranch && currentBranch.startsWith('fix/issue-')) {
         const issueNumberStr = currentBranch.replace('fix/issue-', '');
@@ -274,7 +277,15 @@ async function runHealCommand() {
   }
 }
 
+let isShipCommandRunning = false;
+
 async function runShipCommand() {
+  if (isShipCommandRunning) {
+    await uiLog.warn("A shipment operation is already in progress.");
+    return;
+  }
+  isShipCommandRunning = true;
+
   printCentered('\n' + chalk.bold.black.bgWhite('  GIGA SHIP  ') + '\n');
   resetTelemetry();
 
@@ -282,6 +293,7 @@ async function runShipCommand() {
     await log.warn("Shipment Aborted: No active code modifications were validated for this issue context.");
     printCentered('\n' + chalk.bold.black.bgWhite('  SHIP ABORTED  ') + '\n');
     printTelemetryPanel();
+    isShipCommandRunning = false;
     return;
   }
 
@@ -294,6 +306,7 @@ async function runShipCommand() {
     if (!diff || diff.trim() === '') {
       await uiLog.warn('No changes detected in workspace. Nothing to ship.');
       printCentered('\n' + chalk.bold.black.bgWhite('  SHIP SKIPPED  ') + '\n');
+      isShipCommandRunning = false;
       return;
     }
 
@@ -315,8 +328,8 @@ async function runShipCommand() {
     const { owner, repo } = await getRepoInfo();
     s.stop(chalk.bold.white('Target repository: ' + owner + '/' + repo));
 
-    const git = simpleGit();
-    const status = await git.status();
+    const git = getGitClient();
+    const status = await executeGitOperation(() => git.status(), 'Failed to get status');
     const currentBranch = status.current;
 
     if (!currentBranch) {
@@ -324,7 +337,39 @@ async function runShipCommand() {
     }
 
     s.start(`Staging and committing changes: "${prDetails.title}"`);
-    await stageCommitPush(currentBranch, prDetails.title);
+    let commitSuccess = false;
+    let isCommitMidFlight = false;
+
+    while (!commitSuccess) {
+      if (isCommitMidFlight) {
+        break;
+      }
+      isCommitMidFlight = true;
+
+      try {
+        await safeguardGitignore(process.cwd());
+
+        s.message("Staging files...");
+        await executeGitOperation(() => safeStageFiles(git, process.cwd()), 'Staging changes failed');
+
+        s.message(`Committing changes: "${prDetails.title}"`);
+        await executeGitOperation(() => git.commit(prDetails.title), 'Committing changes failed');
+
+        commitSuccess = true;
+      } catch (commitError: any) {
+        s.stop(chalk.bold.red('Commit failed'));
+        throw commitError;
+      } finally {
+        isCommitMidFlight = false;
+      }
+
+      if (commitSuccess) {
+        break;
+      }
+    }
+
+    s.message("Pushing code to remote...");
+    await executeGitOperation(() => git.push('origin', currentBranch, { '--set-upstream': null }), `Failed to push branch '${currentBranch}'`);
     s.stop(chalk.bold.white(`Committed and pushed branch '${currentBranch}'`));
 
     s.start('Creating GitHub Pull Request');
@@ -348,13 +393,13 @@ async function runShipCommand() {
         await log.success(`Issue #${currentIssueNumber} successfully closed via GitHub API.`);
 
         s.start('Switching to fallback branch');
-        const branches = await git.branchLocal();
+        const branches = await executeGitOperation(() => git.branchLocal(), 'Failed to get branch list');
         const fallbackBranch = branches.all.includes('main') ? 'main' : 'master';
-        await git.checkout(fallbackBranch);
+        await executeGitOperation(() => git.checkout(fallbackBranch), `Failed to checkout fallback branch '${fallbackBranch}'`);
         s.stop(chalk.bold.white(`Switched to fallback branch '${fallbackBranch}'`));
 
         s.start(`Deleting local branch '${currentBranch}'`);
-        await git.deleteLocalBranch(currentBranch, true);
+        await executeGitOperation(() => git.deleteLocalBranch(currentBranch, true), `Failed to delete local branch '${currentBranch}'`);
         s.stop(chalk.bold.white(`Deleted local branch '${currentBranch}'`));
       }
     }
@@ -364,6 +409,7 @@ async function runShipCommand() {
   } catch (error: any) {
     await uiLog.error(`Ship failed: ${error.message}`);
   } finally {
+    isShipCommandRunning = false;
     printTelemetryPanel();
   }
 }
@@ -436,8 +482,8 @@ async function launchInteractiveShell() {
   const prompt = async () => {
     let branch = 'unknown';
     try {
-      const git = simpleGit();
-      const status = await git.status();
+      const git = getGitClient();
+      const status = await executeGitOperation(() => git.status(), 'Failed to get status');
       branch = status.current || 'detached';
     } catch (_) {}
 
@@ -546,8 +592,8 @@ async function launchInteractiveShell() {
 
       if (input === '/status') {
         try {
-          const git = simpleGit();
-          const status = await git.status();
+          const git = getGitClient();
+          const status = await executeGitOperation(() => git.status(), 'Failed to check status');
           await animateTypewriter(chalk.bold.white('Git Status:'));
           await animateTypewriter(`  Branch: ${status.current}`);
           await animateTypewriter(`  Staged files: ${status.staged.length}`);
@@ -576,8 +622,8 @@ async function launchInteractiveShell() {
 
   let initialBranch = 'unknown';
   try {
-    const git = simpleGit();
-    const status = await git.status();
+    const git = getGitClient();
+    const status = await executeGitOperation(() => git.status(), 'Failed to get initial status');
     initialBranch = status.current || 'detached';
   } catch (_) {}
   drawDashboard(initialBranch);
