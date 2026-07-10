@@ -25,6 +25,7 @@ import {
   safeguardGitignore,
   safeStageFiles
 } from './tools/index.js';
+import { telemetryStore } from './ui/telemetryStore.js';
 
 export let lastValidationState: 'healed' | 'stood_down' | 'untested' = 'untested';
 
@@ -163,11 +164,11 @@ export async function generateChatCompletion(
 
   const apiKey = process.env.API_KEY || (
     provider === 'OpenAI' ? process.env.OPENAI_API_KEY :
-    provider === 'Anthropic Claude' ? process.env.ANTHROPIC_API_KEY :
+    (provider === 'Anthropic Claude' || provider === 'Anthropic') ? process.env.ANTHROPIC_API_KEY :
     provider === 'DeepSeek' ? process.env.DEEPSEEK_API_KEY : process.env.GEMINI_API_KEY
   );
 
-  if (!apiKey && provider !== 'Local Ollama') {
+  if (!apiKey && provider !== 'Local Ollama' && provider !== 'Ollama') {
     throw new Error(`API key for provider ${provider} is not configured. Please run /connect.`);
   }
 
@@ -175,7 +176,7 @@ export async function generateChatCompletion(
   console.log(chalk.ansi256(208)('→ ') + `[giga] LLM engine processing...`);
 
   try {
-    if (provider === 'Google Gemini') {
+    if (provider === 'Google Gemini' || provider === 'Google') {
       const client = new GoogleGenAI({ apiKey });
       const response = await client.models.generateContent({
         model,
@@ -211,7 +212,7 @@ export async function generateChatCompletion(
     let headers: Record<string, string> = { 'Content-Type': 'application/json' };
     let body: any = {};
 
-    if (provider === 'OpenAI' || provider === 'DeepSeek' || provider === 'Local Ollama') {
+    if (provider === 'OpenAI' || provider === 'DeepSeek' || provider === 'Local Ollama' || provider === 'Ollama') {
       if (provider === 'OpenAI') endpoint = 'https://api.openai.com/v1/chat/completions';
       else if (provider === 'DeepSeek') endpoint = 'https://api.deepseek.com/chat/completions';
       else endpoint = 'http://localhost:11434/v1/chat/completions';
@@ -249,9 +250,9 @@ export async function generateChatCompletion(
             };
           });
         }).flat();
-        body.tool_choice = 'required';
       }
-    } else if (provider === 'Anthropic Claude') {
+      body.tool_choice = 'required';
+    } else if (provider === 'Anthropic Claude' || provider === 'Anthropic') {
       endpoint = 'https://api.anthropic.com/v1/messages';
       headers['x-api-key'] = apiKey || '';
       headers['anthropic-version'] = '2023-06-01';
@@ -286,7 +287,7 @@ export async function generateChatCompletion(
       sessionTokensOutput += outputTokens;
     }
 
-    if (provider === 'OpenAI' || provider === 'DeepSeek' || provider === 'Local Ollama') {
+    if (provider === 'OpenAI' || provider === 'DeepSeek' || provider === 'Local Ollama' || provider === 'Ollama') {
       const choice = data.choices[0];
       if (tools && choice.message.tool_calls) {
         const tc = choice.message.tool_calls[0];
@@ -301,7 +302,7 @@ export async function generateChatCompletion(
         });
       }
       return choice.message.content || '';
-    } else if (provider === 'Anthropic Claude') {
+    } else if (provider === 'Anthropic Claude' || provider === 'Anthropic') {
       return data.content[0]?.text || '';
     }
 
@@ -483,6 +484,23 @@ export async function runSelfHealingIteration(
   // Phase 2: Semantic Planning Map
   const allFilesList = listCodeFiles(cwd);
   const plannedFiles = await generatePlanningMap(issueText, health.rawLog, allFilesList);
+  
+  let totalLines = 0;
+  let targetedLines = 0;
+  for (const file of allFilesList) {
+    const filePath = path.join(cwd, file);
+    if (fs.existsSync(filePath)) {
+      try {
+        const lines = fs.readFileSync(filePath, 'utf8').split('\n').length;
+        totalLines += lines;
+        if (plannedFiles.some(pf => pf.filePath === file)) {
+          targetedLines += lines;
+        }
+      } catch (_) {}
+    }
+  }
+  const pruningPercent = totalLines > 0 ? (1 - (targetedLines / totalLines)) * 100 : 0;
+  telemetryStore.setTokensSlashed(pruningPercent);
   
   if (plannedFiles.length === 0) {
     console.log(chalk.yellow('[giga] Planning map empty. Falling back to default relevant files.'));
@@ -702,7 +720,26 @@ export async function identifyRelevantFiles(
     console.log(chalk.bold.green('✓ ') + `Identified relevant files via ${provider}`);
     const parsed = JSON.parse(text);
     if (parsed && Array.isArray(parsed.files)) {
-      return parsed.files.map((f: any) => String(f));
+      const relFiles = parsed.files.map((f: any) => String(f));
+      
+      let totalLines = 0;
+      let targetedLines = 0;
+      for (const file of allFiles) {
+        const filePath = path.join(process.cwd(), file);
+        if (fs.existsSync(filePath)) {
+          try {
+            const lines = fs.readFileSync(filePath, 'utf8').split('\n').length;
+            totalLines += lines;
+            if (relFiles.includes(file)) {
+              targetedLines += lines;
+            }
+          } catch (_) {}
+        }
+      }
+      const pruningPercent = totalLines > 0 ? (1 - (targetedLines / totalLines)) * 100 : 0;
+      telemetryStore.setTokensSlashed(pruningPercent);
+      
+      return relFiles;
     }
     return [];
   } catch (error: any) {

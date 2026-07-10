@@ -31,6 +31,9 @@ import {
   getRepoInfo,
   safeguardGitignore
 } from './tools/index.js';
+import { StatusBar } from './ui/StatusBar.js';
+import { telemetryStore } from './ui/telemetryStore.js';
+import { GIGA_VERSION } from './config/version.js';
 
 dotenv.config();
 
@@ -71,15 +74,14 @@ const COMMAND_MENU = `
 /exit       terminate engine
 `.trim();
 
-const PROVIDERS = ['Google Gemini', 'OpenAI', 'Anthropic Claude', 'DeepSeek', 'Local Ollama', 'Groq'];
-const MODELS: Record<string, string[]> = {
-  'Google Gemini': ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash-thinking-exp-01-21'],
-  'OpenAI': ['gpt-4o', 'gpt-4o-mini', 'o1', 'o3-mini'],
-  'Anthropic Claude': ['claude-3-5-sonnet-20241022', 'claude-3-5-haiku-20241022'],
-  'DeepSeek': ['deepseek-chat', 'deepseek-coder'],
-  'Local Ollama': ['llama3', 'mistral', 'codellama'],
-  'Groq': ['llama3-8b-8192', 'llama3-70b-8192', 'mixtral-8x7b-32768', 'gemma2-9b-it']
-};
+import { AVAILABLE_MODELS } from './config/models.js';
+
+const PROVIDERS = Array.from(new Set(AVAILABLE_MODELS.map(m => m.provider)));
+const MODELS: Record<string, string[]> = {};
+for (const m of AVAILABLE_MODELS) {
+  if (!MODELS[m.provider]) MODELS[m.provider] = [];
+  MODELS[m.provider].push(m.id);
+}
 
 const Select = ({ options, onSelect }: { options: string[], onSelect: (val: string) => void }) => {
   const [index, setIndex] = useState(0);
@@ -124,13 +126,7 @@ const GigaApp = () => {
   const [configDraft, setConfigDraft] = useState<Record<string, string>>({});
   const [wizardInput, setWizardInput] = useState('');
 
-  // Polling Telemetry
-  useEffect(() => {
-    const timer = setInterval(() => {
-      setTokens(sessionTokensInput + sessionTokensOutput);
-    }, 100);
-    return () => clearInterval(timer);
-  }, []);
+  // Telemetry is now handled by StatusBar and telemetryStore
 
   useEffect(() => {
     const handleResize = () => {
@@ -181,11 +177,9 @@ const GigaApp = () => {
     if (!val) return;
     
     if (wizardStep === 'api_key') {
-      const keyName = configDraft['LLM_PROVIDER'] === 'Google Gemini' ? 'GEMINI_API_KEY' : 
+      const keyName = configDraft['LLM_PROVIDER'] === 'Google' ? 'GEMINI_API_KEY' : 
                       configDraft['LLM_PROVIDER'] === 'OpenAI' ? 'OPENAI_API_KEY' :
-                      configDraft['LLM_PROVIDER'] === 'DeepSeek' ? 'DEEPSEEK_API_KEY' :
-                      configDraft['LLM_PROVIDER'] === 'Anthropic Claude' ? 'ANTHROPIC_API_KEY' :
-                      configDraft['LLM_PROVIDER'] === 'Groq' ? 'GROQ_API_KEY' : 'API_KEY';
+                      configDraft['LLM_PROVIDER'] === 'Anthropic' ? 'ANTHROPIC_API_KEY' : 'API_KEY';
       
       setConfigDraft(prev => ({ ...prev, [keyName]: val }));
       setWizardInput('');
@@ -220,6 +214,7 @@ const GigaApp = () => {
 
   const executeHeal = async () => {
     try {
+      telemetryStore.startTimer();
       addLog({ text: chalk.cyan(`[giga] Initiating Self-Healing...`), status: 'loading' });
       const { owner, repo } = await getRepoInfo(process.cwd());
       const git = getGitClient(process.cwd());
@@ -251,12 +246,14 @@ const GigaApp = () => {
       addLog(chalk.red(`[Error] ${e.message}`));
       setAgentState('FAILED');
     }
+    telemetryStore.stopTimer();
     setIsProcessing(false);
   };
 
   const executeShip = async () => {
     try {
       setAgentState('DISPATCH');
+      telemetryStore.startTimer();
       addLog({ text: `[giga] Staging local workspace files...`, status: 'loading' });
       
       const git = getGitClient(process.cwd());
@@ -291,6 +288,7 @@ const GigaApp = () => {
       addLog(chalk.red(`[Error] ${e.message}`));
       setAgentState('FAILED');
     }
+    telemetryStore.stopTimer();
     setIsProcessing(false);
   };
 
@@ -333,6 +331,7 @@ const GigaApp = () => {
         }
         
         addLog({ text: chalk.cyan(`[giga] Pulling issue #${issueNum}...`), status: 'loading' });
+        telemetryStore.startTimer();
         const { owner, repo } = await getRepoInfo(process.cwd());
         const issue = await fetchGithubIssue(issueNum, owner, repo);
         
@@ -341,8 +340,8 @@ const GigaApp = () => {
         addLog({ text: chalk.cyan(`[giga] Branching context for issue #${issueNum}`), status: 'loading' });
         await createAndSwitchBranch(`fix/issue-${issueNum}`);
         await safeguardGitignore(process.cwd());
-        completeActiveLogs();
         addLog({ text: chalk.green(`[giga] Fork complete. Ready for /heal.`), status: 'success' });
+        telemetryStore.stopTimer();
 
       } else if (cmd.startsWith('/heal')) {
         setWizardStep('confirm_heal');
@@ -360,7 +359,6 @@ const GigaApp = () => {
       addLog(chalk.red(`[Error] ${e.message}`));
       setAgentState('FAILED');
     }
-    
     setIsProcessing(false);
   };
 
@@ -378,15 +376,11 @@ const GigaApp = () => {
 
   return (
     <Box flexDirection="column" width={cols} height={rows}>
-      <Box flexDirection="row" borderStyle="single" borderColor="gray" justifyContent="center">
-        <Text dimColor>
-          giga v1.0.4 | {currentModel} | {apiKeyHidden} | Tokens: {tokens} | Cost: ~${currentCost} | State: {agentState}
-        </Text>
-      </Box>
+      <StatusBar />
 
       <Box flexGrow={1} flexDirection="column" alignItems="center" justifyContent="center">
         <Text>{GIGA_ASCII}</Text>
-        <Text dimColor>v1.0.4</Text>
+        <Text dimColor>v{GIGA_VERSION}</Text>
         
         {wizardStep === 'none' && (
           <>
@@ -437,10 +431,11 @@ const GigaApp = () => {
           <Box flexDirection="column" alignItems="center" marginTop={2}>
             <Text bold color="#FF8700">Select Model</Text>
             <Select 
-              options={MODELS[configDraft['LLM_PROVIDER'] || 'Google Gemini']} 
+              options={MODELS[configDraft['LLM_PROVIDER'] || 'Google'] || []} 
               onSelect={(m) => {
                 setConfigDraft(prev => ({ ...prev, LLM_MODEL: m }));
-                if (configDraft['LLM_PROVIDER'] === 'Local Ollama') {
+                telemetryStore.setModelId(m);
+                if (configDraft['LLM_PROVIDER'] === 'Local Ollama' || configDraft['LLM_PROVIDER'] === 'Ollama') {
                   setWizardStep('github_token');
                 } else {
                   setWizardStep('api_key');
