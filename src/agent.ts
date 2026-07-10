@@ -41,6 +41,20 @@ export function resetTelemetry() {
 }
 
 export function getSessionCost(): number {
+  const model = process.env.LLM_MODEL || 'gemini-2.5-flash';
+  const inM = sessionTokensInput / 1000000;
+  const outM = sessionTokensOutput / 1000000;
+  
+  if (model.includes('gemini-1.5-pro') || model.includes('gemini-2.5-pro')) return (inM * 1.25) + (outM * 5.00);
+  if (model.includes('gemini-1.5-flash') || model.includes('gemini-2.5-flash')) return (inM * 0.075) + (outM * 0.30);
+  if (model.includes('gpt-4o-mini')) return (inM * 0.15) + (outM * 0.60);
+  if (model.includes('gpt-4o')) return (inM * 5.00) + (outM * 15.00);
+  if (model.includes('o1')) return (inM * 15.00) + (outM * 60.00);
+  if (model.includes('claude-3-5-sonnet')) return (inM * 3.00) + (outM * 15.00);
+  if (model.includes('claude-3-5-haiku')) return (inM * 0.25) + (outM * 1.25);
+  if (model.includes('deepseek-chat') || model.includes('deepseek-coder')) return (inM * 0.14) + (outM * 0.28);
+  if (model.includes('llama') || model.includes('mixtral') || model.includes('gemma')) return (inM * 0.05) + (outM * 0.08); // Groq approx
+  
   return 0.0;
 }
 

@@ -1025,6 +1025,7 @@ export function saveRCConfig(
   if (config.provider === 'Anthropic Claude') process.env.ANTHROPIC_API_KEY = config.apiKey;
   if (config.provider === 'OpenAI') process.env.OPENAI_API_KEY = config.apiKey;
   if (config.provider === 'DeepSeek') process.env.DEEPSEEK_API_KEY = config.apiKey;
+  if (config.provider === 'Groq') process.env.GROQ_API_KEY = config.apiKey;
 }
 
 export async function connectProvider(cwd: string = process.cwd()): Promise<void> {
@@ -1037,6 +1038,7 @@ export async function connectProvider(cwd: string = process.cwd()): Promise<void
       { value: 'Anthropic Claude', label: 'Anthropic Claude' },
       { value: 'OpenAI', label: 'OpenAI' },
       { value: 'DeepSeek', label: 'DeepSeek' },
+      { value: 'Groq', label: 'Groq' },
       { value: 'Local Ollama', label: 'Local Ollama (Offline)' }
     ]
   });
@@ -1078,6 +1080,13 @@ export async function connectProvider(cwd: string = process.cwd()): Promise<void
       { value: 'llama3.1:8b', label: 'llama3.1:8b' },
       { value: 'qwen2.5-coder:7b', label: 'qwen2.5-coder:7b' },
       { value: 'mistral', label: 'mistral' }
+    ];
+  } else if (provider === 'Groq') {
+    modelOptions = [
+      { value: 'llama3-8b-8192', label: 'llama3-8b-8192' },
+      { value: 'llama3-70b-8192', label: 'llama3-70b-8192' },
+      { value: 'mixtral-8x7b-32768', label: 'mixtral-8x7b-32768' },
+      { value: 'gemma2-9b-it', label: 'gemma2-9b-it' }
     ];
   }
 

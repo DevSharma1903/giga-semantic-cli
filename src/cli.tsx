@@ -71,13 +71,14 @@ const COMMAND_MENU = `
 /exit       terminate engine
 `.trim();
 
-const PROVIDERS = ['Google Gemini', 'OpenAI', 'Anthropic Claude', 'DeepSeek', 'Local Ollama'];
+const PROVIDERS = ['Google Gemini', 'OpenAI', 'Anthropic Claude', 'DeepSeek', 'Local Ollama', 'Groq'];
 const MODELS: Record<string, string[]> = {
   'Google Gemini': ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash-thinking-exp-01-21'],
   'OpenAI': ['gpt-4o', 'gpt-4o-mini', 'o1', 'o3-mini'],
   'Anthropic Claude': ['claude-3-5-sonnet-20241022', 'claude-3-5-haiku-20241022'],
   'DeepSeek': ['deepseek-chat', 'deepseek-coder'],
-  'Local Ollama': ['llama3', 'mistral', 'codellama']
+  'Local Ollama': ['llama3', 'mistral', 'codellama'],
+  'Groq': ['llama3-8b-8192', 'llama3-70b-8192', 'mixtral-8x7b-32768', 'gemma2-9b-it']
 };
 
 const Select = ({ options, onSelect }: { options: string[], onSelect: (val: string) => void }) => {
@@ -88,7 +89,7 @@ const Select = ({ options, onSelect }: { options: string[], onSelect: (val: stri
     if (key.return) onSelect(options[index]);
   });
   return (
-    <Box flexDirection="column" paddingX={2} paddingY={1} borderStyle="round" borderColor="#FF8700" width={50}>
+    <Box flexDirection="column" paddingX={2} paddingY={1} borderStyle="round" borderColor="#FF8700">
       {options.map((opt, i) => (
         <Text key={opt} color={i === index ? '#FF8700' : undefined} bold={i === index}>
           {i === index ? '❯ ' : '  '} {opt}
@@ -183,7 +184,8 @@ const GigaApp = () => {
       const keyName = configDraft['LLM_PROVIDER'] === 'Google Gemini' ? 'GEMINI_API_KEY' : 
                       configDraft['LLM_PROVIDER'] === 'OpenAI' ? 'OPENAI_API_KEY' :
                       configDraft['LLM_PROVIDER'] === 'DeepSeek' ? 'DEEPSEEK_API_KEY' :
-                      configDraft['LLM_PROVIDER'] === 'Anthropic Claude' ? 'ANTHROPIC_API_KEY' : 'API_KEY';
+                      configDraft['LLM_PROVIDER'] === 'Anthropic Claude' ? 'ANTHROPIC_API_KEY' :
+                      configDraft['LLM_PROVIDER'] === 'Groq' ? 'GROQ_API_KEY' : 'API_KEY';
       
       setConfigDraft(prev => ({ ...prev, [keyName]: val }));
       setWizardInput('');
@@ -369,13 +371,16 @@ const GigaApp = () => {
   else if (currentProvider === 'OpenAI') activeKey = process.env.OPENAI_API_KEY || '';
   else if (currentProvider === 'Anthropic Claude') activeKey = process.env.ANTHROPIC_API_KEY || '';
   else if (currentProvider === 'DeepSeek') activeKey = process.env.DEEPSEEK_API_KEY || '';
+  else if (currentProvider === 'Groq') activeKey = process.env.GROQ_API_KEY || '';
   const apiKeyHidden = activeKey ? `[sk-...${activeKey.slice(-4)}]` : '[NO-KEY]';
   
+  const currentCost = getSessionCost().toFixed(4);
+
   return (
     <Box flexDirection="column" width={cols} height={rows}>
       <Box flexDirection="row" borderStyle="single" borderColor="gray" justifyContent="center">
         <Text dimColor>
-          giga v1.0.4 | {currentModel} | {apiKeyHidden} | Tokens: {tokens} | Cost: ~$0.000 | State: {agentState}
+          giga v1.0.4 | {currentModel} | {apiKeyHidden} | Tokens: {tokens} | Cost: ~${currentCost} | State: {agentState}
         </Text>
       </Box>
 
@@ -389,7 +394,7 @@ const GigaApp = () => {
               <Text>{COMMAND_MENU}</Text>
             </Box>
             
-            <Box flexDirection="column" width={60} minHeight={12}>
+            <Box flexDirection="column" width={Math.min(cols - 4, 80)} minHeight={12}>
                 {logs.map((l) => (
                     <Box key={l.id} flexDirection="row">
                         {l.status === 'loading' && <Text color="cyan"><Spinner type="dots" /> </Text>}
@@ -400,7 +405,7 @@ const GigaApp = () => {
                 ))}
             </Box>
 
-            <Box borderStyle="round" width={50} borderColor={isProcessing ? 'gray' : '#FF8700'}>
+            <Box borderStyle="round" width={Math.min(cols - 4, 50)} borderColor={isProcessing ? 'gray' : '#FF8700'}>
               <Box marginRight={1}>
                 <Text color={isProcessing ? 'gray' : '#FF8700'}>
                   {isProcessing ? 'processing ❯' : 'giga ❯'}
@@ -448,7 +453,7 @@ const GigaApp = () => {
         {wizardStep === 'api_key' && (
           <Box flexDirection="column" alignItems="center" marginTop={2}>
             <Text bold color="#FF8700">Enter API Key for {configDraft['LLM_PROVIDER']}</Text>
-            <Box borderStyle="round" width={50} borderColor="#FF8700">
+            <Box borderStyle="round" width={Math.min(cols - 4, 50)} borderColor="#FF8700">
               <TextInput
                 value={wizardInput}
                 onChange={setWizardInput}
@@ -462,7 +467,7 @@ const GigaApp = () => {
         {wizardStep === 'github_token' && (
           <Box flexDirection="column" alignItems="center" marginTop={2}>
             <Text bold color="#FF8700">Enter GitHub Token (PAT)</Text>
-            <Box borderStyle="round" width={50} borderColor="#FF8700">
+            <Box borderStyle="round" width={Math.min(cols - 4, 50)} borderColor="#FF8700">
               <TextInput
                 value={wizardInput}
                 onChange={setWizardInput}
@@ -477,7 +482,7 @@ const GigaApp = () => {
           <Box flexDirection="column" alignItems="center" marginTop={2}>
             <Text bold color="#FF8700">Security Check: Giga will execute local compilation scripts to verify code health.</Text>
             <Text color="gray">Do you want to proceed? (y/n)</Text>
-            <Box borderStyle="round" width={50} borderColor="#FF8700">
+            <Box borderStyle="round" width={Math.min(cols - 4, 50)} borderColor="#FF8700">
               <TextInput
                 value={wizardInput}
                 onChange={setWizardInput}
@@ -491,7 +496,7 @@ const GigaApp = () => {
           <Box flexDirection="column" alignItems="center" marginTop={2}>
             <Text bold color="#FF8700">Security Check: Giga will stage, commit, and push modifications upstream.</Text>
             <Text color="gray">Do you want to proceed? (y/n)</Text>
-            <Box borderStyle="round" width={50} borderColor="#FF8700">
+            <Box borderStyle="round" width={Math.min(cols - 4, 50)} borderColor="#FF8700">
               <TextInput
                 value={wizardInput}
                 onChange={setWizardInput}
